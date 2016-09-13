@@ -1,82 +1,94 @@
 /*
 	MIT License http://www.opensource.org/licenses/mit-license.php
 	Author Tobias Koppers @sokra
+	Edits Darren Thompson @DiscoStarslayer
 */
+
 var ConstDependency = require("webpack/lib/dependencies/ConstDependency");
 var NullFactory = require("webpack/lib/NullFactory");
 var MissingLocalizationError = require("./MissingLocalizationError");
+var IntlMessageFormat = require('intl-messageformat');
 
 /**
  *
- * @param {object|function} localization
- * @param {object|string} Options object or obselete functionName string
+ * @param {string} locale Locale to translate to
+ * @param {object} languages Object of all the supported languages, key being relevant locale
+ * @param {object} options Options object
  * @constructor
  */
-function I18nPlugin(localization, options) {
-	// Backward-compatiblility
-	if (typeof options === "string") {
-		options = {
-			functionName: options
-		};
-	}
-
-	if (arguments[2]) {
-		options.failOnMissing = arguments[2];
-	}
-
+function MessageFormatPlugin(locale, languages, options) {
 	this.options = options || {};
-	this.localization = localization? ('function' === typeof localization? localization: makeLocalizeFunction(localization, !!this.options.nested))
-									: null;
+
+	this.locale = locale;
+	this.messages = typeof languages[locale] === 'object' ? languages[locale] : {};
+
 	this.functionName = this.options.functionName || "__";
+	this.customFormats = this.options.customFormats;
 	this.failOnMissing = !!this.options.failOnMissing;
 }
 
-module.exports = I18nPlugin;
+module.exports = MessageFormatPlugin;
 
-I18nPlugin.prototype.apply = function(compiler) {
-	var localization = this.localization,
-		failOnMissing = this.failOnMissing;
+MessageFormatPlugin.prototype.apply = function(compiler) {
+	var messages = this.messages,
+		failOnMissing = this.failOnMissing,
+		locale = this.locale,
+		customFormats = this.customFormats;
+
 	compiler.plugin("compilation", function(compilation, params) {
 		compilation.dependencyFactories.set(ConstDependency, new NullFactory());
 		compilation.dependencyTemplates.set(ConstDependency, new ConstDependency.Template());
 	});
+
 	compiler.parser.plugin("call " + this.functionName, function(expr) {
-		var param, defaultValue;
-		switch(expr.arguments.length) {
-		case 2:
-			param = this.evaluateExpression(expr.arguments[1]);
-			if(!param.isString()) return;
-			param = param.string;
-			defaultValue = this.evaluateExpression(expr.arguments[0]);
-			if(!defaultValue.isString()) return;
-			defaultValue = defaultValue.string;
-			break;
-		case 1:
-			param = this.evaluateExpression(expr.arguments[0]);
-			if(!param.isString()) return;
-			defaultValue = param = param.string;
-			break;
-		default:
-			return;
+		var key, values;
+
+		switch (expr.arguments.length) {
+			case 2:
+				if (expr.arguments[1].type !== 'ObjectExpression') return;
+				values = parseObject(this, expr.arguments[1]);
+
+				key = this.evaluateExpression(expr.arguments[0]);
+				if (!key.isString()) return;
+				key = key.string;
+
+				break;
+			case 1:
+				values = null;
+
+				key = this.evaluateExpression(expr.arguments[0]);
+				if (!key.isString()) return;
+				key = key.string;
+
+				break;
+			default:
+				return;
 		}
-		var result = localization ? localization(param) : defaultValue;
-		if(typeof result == "undefined") {
+
+		if (messages[key]) {
+			var msg = new IntlMessageFormat(messages[key], locale, customFormats);
+			var result = msg.format(values);
+		} else {
 			var error = this.state.module[__dirname];
-			if(!error) {
-				error = this.state.module[__dirname] = new MissingLocalizationError(this.state.module, param, defaultValue);
+			if (!error) {
+				error = this.state.module[__dirname] = new MissingLocalizationError(this.state.module, key, values);
 				if (failOnMissing) {
 					this.state.module.errors.push(error);
 				} else {
 					this.state.module.warnings.push(error);
 				}
-			} else if(error.requests.indexOf(param) < 0) {
-				error.add(param, defaultValue);
+			} else if (error.requests.indexOf(key) < 0) {
+				error.add(key, values);
 			}
-			result = defaultValue;
+
+			result = key;
 		}
+
 		var dep = new ConstDependency(JSON.stringify(result), expr.range);
 		dep.loc = expr.loc;
+
 		this.state.current.addDependency(dep);
+
 		return true;
 	});
 
@@ -84,34 +96,22 @@ I18nPlugin.prototype.apply = function(compiler) {
 
 /**
  *
- * @param {object}  localization
- * @param {string}  string key
- * @returns {*}
+ * @param {object} context Parser context
+ * @param {object} objectAST Abstract syntax tree of a values object
  */
-function byString(object, stringKey) {
-	stringKey = stringKey.replace(/^\./, ''); // strip a leading dot
+function parseObject(context, objectAST) {
+	var object = {};
 
-	var keysArray = stringKey.split('.');
-	for (var i = 0, length = keysArray.length; i < length; ++i) {
-		var key = keysArray[i];
+	objectAST.properties.forEach(function(prop) {
+		var key = prop.key.name;
+		var value = context.evaluateExpression(prop.value);
 
-		if (key in object) {
-			object = object[key];
-		} else {
-			return;
+		if (value.isString()) {
+			object[key] = value.string;
+		} else if (value.isNumber()) {
+			object[key] = value.number;
 		}
-	}
+	});
 
 	return object;
-}
-
-/**
- *
- * @param {object}  localization
- * @returns {Function}
- */
-function makeLocalizeFunction(localization, nested) {
-	return function localizeFunction(key) {
-		return nested ? byString(localization, key) : localization[key];
-	};
 }
